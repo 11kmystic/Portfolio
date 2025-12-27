@@ -1,0 +1,439 @@
+---
+title: "Intial Data Cleanup"
+author: "Kevin"
+date: "2024-02-29"
+output:
+  rmdformats::readthedown:
+  self_contained: true
+  thumbnails: true
+  lightbox: true
+  gallery: false
+  highlight: tango
+  toc_float: true
+  toc_depth: 2
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Libs List
+library(glue)
+library(ggplot2)
+library(corrplot)
+library(ggcorrplot)
+library(readr)
+library(tidyverse)
+library(data.table)
+library(stringr)
+```
+
+
+```{r}
+sephora <- read_csv("sephora_website_dataset.csv")
+seph <- sephora
+```
+
+
+
+# Creating Binary Dummy Variables
+
+
+```{r}
+seph$has_options <- ifelse(sephora$options == "no options", 0, 1)
+seph$has_instructions <- ifelse(sephora$how_to_use == "no instructions", 0, 1) 
+seph$known_ingredients <- ifelse(sephora$ingredients == "unknown", 0, 1)
+seph$has_size <- ifelse(sephora$size == "no size", 0, 1)
+```
+
+# Extracting Size
+
+## Sizes
+
+```{r}
+# Grabbing 
+sizes <- function(string){
+  pattern <- regexpr("\\d+\\.*\\d*\\s*(g|mL)", string, ignore.case = TRUE, perl=TRUE)
+  
+  if (grepl("Softgel", string, ignore.case = TRUE) || grepl("Glitter", string, 
+                                                             ignore.case = TRUE)) { 
+  # Softgel and Glitter fringe case
+    
+    return(string)
+    
+  } else if (grepl("g", string, ignore.case = TRUE) || grepl("mL", string, ignore.case = TRUE)) { # For mL and g
+    match <-regmatches(string, pattern)
+    return(match)
+    
+  } else { # For no size etc
+    return(string)
+  }
+}
+
+# Sanity Check for sizes
+print(sizes("no size"))
+print(sizes('10.25" x 1.5" x 6"'))
+print(sizes("0.7 oz/ 20.5 mL"))
+print(sizes("0.7 oz/20ml"))
+print(sizes("12 x 0.05oz/1.4G"))
+print(sizes("12 x 0.05oz/ 1.4g "))
+print(sizes("8 Softgels"))
+print(sizes("8 oz"))
+print(sizes("8 Glitter"))
+
+```
+
+## Unit Check
+
+
+```{r}
+unit_check <- function(strings) {
+  
+  unname(sapply(strings, function(string) 
+    {
+    if (grepl("Softgel", string, ignore.case = TRUE) || grepl("Capsules", string,
+                                                              ignore.case = TRUE)) {
+      
+      return("in pills")
+      
+    } else if (grepl('"', string) || grepl('in.', string))
+      {
+      return("in cubic inches")
+      
+    } else if (grepl('Wipe', string, ignore.case = TRUE)) 
+      {
+      return ("in wipes")
+      
+    } else if (grepl('Sheet', string, ignore.case = TRUE))
+      {
+      return ("in sheets")
+      
+    } else if (grepl("g", string, ignore.case = TRUE)) {
+      
+      return("in grams")
+      
+    } else if (grepl("mL", string, ignore.case = TRUE)) {
+      
+      return("in mL")
+      
+    } else if (grepl("oz", string, ignore.case = TRUE)) {
+      
+      return("in oz, calc in mL")
+      
+    } else {
+      return(NA) 
+    }
+  }))
+}
+
+#Sanity check for unit_check
+print(unit_check("54g"))
+print(unit_check("54mL"))
+print(unit_check("54oz"))
+print(unit_check('54/37/8"'))
+print(unit_check("8 softgels"))
+print(unit_check("8 Sheets"))
+print(unit_check("8 Wipes"))
+print(unit_check('8 Whatever'))
+print(unit_check("8 capsules"))
+
+```
+## Pure Number
+
+```{r}
+pure_num <- function(strings) {
+  
+  unname(sapply(strings, (function(string){# Just get pure number
+  num <- regexpr("\\d+\\.?\\d*", string, perl=TRUE)
+  
+  if (grepl("g", string, ignore.case = TRUE) || grepl("mL", string, ignore.case = TRUE) ||
+      grepl("Softgel", string, ignore.case = TRUE) || grepl("Capsules", string, ignore.case = TRUE)) {
+    
+    pure_number <- regmatches(string, num)
+    pure_number <- as.numeric(pure_number)
+    
+    return (pure_number)
+    
+  } else if (grepl("oz", string, ignore.case = TRUE)) { 
+    
+    pure_number <- regmatches(string, num)
+    pure_number <- as.numeric(pure_number)
+    
+    oz_convert <- pure_number * 29.5735 # 1 oz = 29.5736 mL
+    
+    return(oz_convert)
+    
+  } else if (grepl("in\\.", string, ignore.case = TRUE) || grepl('"', string, ignore.case = TRUE)) {
+    
+    numbers <- as.numeric(regmatches(string, gregexpr("[0-9]+\\.?[0-9]*", string))[[1]])
+    cubic_inches <- prod(numbers)
+    
+    return(cubic_inches)
+    
+  } else {
+    
+    return(NA)
+    
+  }})))
+  
+}
+
+
+
+# Sanity check for pure_num
+print(pure_num("5.25  g"))
+print(pure_num("5  ml"))
+print(pure_num("1  oz"))
+print(pure_num("no sizes"))
+print(pure_num("54in./37/8"))
+print(pure_num("45 capsules"))
+
+```
+## Setup
+
+```{r}
+seph$size <- sapply(sephora$size, sizes)
+seph$unit <- sapply(seph$size, unit_check)
+seph$pure_num <- sapply(seph$size, pure_num)
+
+head(seph, 10)
+```
+
+# Categorize
+
+## Initial Categories 
+
+```{r}
+unique(seph$category)
+```
+
+## Categorize Function 
+
+```{r}
+categorize <- function(strings){
+  
+  unname(sapply(strings, function(string){
+    
+    if (grepl("Sets", string)) {
+      
+      return("Sets")
+      
+    } else if (grepl("Brush", string) || grepl("Accessories", string) || 
+        grepl("Tools", string) || grepl("Curl", string) ||  grepl("Rollers", string) ||
+        grepl("Accessories", string) || grepl("Shaving", string) || grepl("Irons", string)
+        || grepl("Mirror", string)){
+      
+      return("Tools")
+      
+    } else if (grepl("Perfume", string) || grepl("Cologne", string) ||
+               grepl("Fragrance", string) || grepl("Body Mist & Hair Mist", string)){
+      
+      return("Scents")
+      
+    } else if (grepl("Mist", string) || grepl("Cleanser", string) || 
+               grepl("Exfoliant", string) || grepl("Toners", string) || 
+               grepl("Aging", string) || grepl("Serum", string) || 
+               grepl("Moisturizers", string) || grepl("Cream", string)) {
+      
+      return("Skincare")
+      
+    } else if (grepl("BB & CC Creams", string) || grepl("Lip Stain", string) ||
+               grepl("Eyeliner", string) || grepl("Eyeshadow", string) ||  grepl("Eyebrow", string) ||
+               grepl("Makeup", string) || grepl("Blush", string) || 
+               grepl("Powder", string) || grepl("Concealer", string) || 
+               grepl("Highlight", string) || grepl("Contour", string)) {
+      
+      return("Makeup")
+      
+    }
+    
+    else if (grepl("Hair", string) || grepl("Conditioner", string) || 
+    grepl("Shampoo", string) || grepl("Color Care", string) ||
+    grepl("Color Care", string)) {
+      
+      return("Haircare")
+      
+    } else if (grepl("Lip", string) || grepl("Face", string) || 
+               grepl("Aftershave", string) || grepl("Eye", string) ){
+      
+      return("Face")   
+      
+    } else if (grepl("Body", string) || grepl("Bath", string) || grepl("Cellulite", string)
+               || grepl("Tanner", string) || grepl("Deodorant", string) ||
+                grepl("Sun", string) || grepl("Oil", string)){
+      
+      return("Body")
+      
+    } else {
+      
+      return("Misc")
+      
+    }
+    
+  }))
+}
+
+```
+
+
+## Setup
+
+```{r}
+seph$category <- sapply(sephora$category, categorize)
+
+head(seph, 10)
+```
+
+# Removing Excess Columns
+
+```{r}
+excess <- c("name", "size", "URL", "MarketingFlags_content", "options", "details", "how_to_use", "ingredients")
+
+seph <- select(seph, -excess)
+
+head(seph, 10)
+
+```
+
+# Corplots
+
+## Overall Corrplot
+
+First I'd like to make a corrplot. Columns 22:71 contain the binary ingredient classifications
+
+```{r}
+ingredients <- colnames(seph)[22:71]
+seph_in <- seph[, which(names(seph) %in% ingredients)]
+# Column 36 is WAAAY too long. Let's fix thst
+colnames(seph_in)[36] <- "Talc"
+head(seph_in,10)
+phi <- cor(seph_in, method = "pearson")
+# corrplot.mixed(phi, order = 'AOE')
+heatmap(phi, col = colorRampPalette(c("blue", "white", "red"))(100))
+```
+Very uninformative, so let's try again for the top 10 ingredients. I'm making a function to do so. To investigate a range like top 25-35, we'll need to modify the dataframe being fed in
+
+## Corplots broken up
+
+```{r cars}
+# This function creates a corrplot based off inredients in our dataframe, 
+corrplot_range <- function(df, top=10, order = "AOE"){
+  names <- colnames(df)[1:top]
+  df_top <- df[, which(names(df) %in% names)]
+  phi <- cor(df_top, method = "pearson")
+  corrplot.mixed(phi, order = order)
+  
+  return()
+}
+
+corrplot_range(seph_in, 15)
+corrplot_range(seph_in[, 16:25], 10)
+corrplot_range(seph_in[, 26:35], 10)
+corrplot_range(seph_in[, 36:50], 15)
+```
+Here we see the first 2 ingredients, limonene and linanool have a relatively high correlation at 0.69. Which is still lower the the general cutoff of 0.8.Though I want to keep it.
+
+The last 26-50 ingredients are so ridiculously correlated with each other. we can just get rid of them
+
+```{r}
+seph_in_short <- seph_in[, 1:26]
+corrplot_range(seph_in_short, 26)
+phi <- cor(seph_in_short, method = "pearson")
+```
+It's a little hard to see here, but Triclosan and mineral Oil have correlations of over 0.9 with each other and another variable. So we can get rid of those.
+
+## Filetered Corrplot
+
+```{r}
+excess <- c("Mineral.Oil", "Triclosan")
+seph_in_short <-  seph_in_short[, -which(names(seph_in_short) %in% excess)]
+corrplot_range(seph_in_short, 24)
+phi <-cor(seph_in_short, method = "pearson")
+```
+This looks much better and everything is below our threshold of 0.8! How wonderful! I'll make a df of those ingredients with everything else.
+
+```{r}
+sepho <- seph[, 1:20] # Will remove list of ingredients, but keeps if ingredients are known
+sephora <- cbind(sepho, seph_in_short)
+head(sephora)
+```
+
+
+# Average Price per Category
+
+I was curious about average price of each category, as opposed to summing them up, so here that is. First let's rerun Revathy's code to have something to compare too
+
+## Total Sum per Category
+
+```{r}
+price_sorted_category <- sephora %>%
+  group_by(category) %>%
+  summarise(price = sum(price)) %>%
+  arrange(desc(price)) %>%
+  slice_head(n = 10)
+price_sorted_category
+
+ggplot(price_sorted_category, aes(x=category, y=price, fill=category)) +
+geom_bar(stat="identity") +
+scale_fill_brewer(palette="Spectral") +
+theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+labs(x="Category", y="Total Price")
+```
+
+## Mean per category
+
+```{r}
+price_sorted_category <- sephora %>%
+  group_by(category) %>%
+  summarise(price = mean(price)) %>%
+  arrange(desc(price)) %>%
+  slice_head(n = 10)
+price_sorted_category
+
+ggplot(price_sorted_category, aes(x=category, y=price, fill=category)) +
+geom_bar(stat="identity") +
+scale_fill_brewer(palette="Spectral") +
+theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+labs(x="Category", y="Average Price")
+```
+Scents being expensive makes sense. There are tons of $100 perfumes. Interestingly enough, there is enough cheap skincare to bring down the mean, even though it had such a  high total earlier in our EDA.
+
+## Log price Boxplots
+
+I also wanted to look at the log range of each one.
+
+```{r}
+ggplot(sephora, aes(x=category, y=log(price), fill= category)) + 
+  geom_boxplot()
+```
+
+# Oulier Removal
+
+From here, we can see that we could benefit from removing outliers. (This categorization was also my doing, so there's that. I'm impressed it even looks normalish anyway) What would constitute an outlier? Anything 3 or more z-scores away from the log price of the mean. Let's clean that.
+
+## Setting z-score
+
+```{r}
+sephora$log_price <- log(sephora$price)
+
+sephora_z <- sephora %>%
+  group_by(category) %>%
+  mutate(zscore = scale(log_price)) %>%
+  filter(abs(zscore) < 3) %>%
+  ungroup()
+
+ggplot(sephora_z, aes(x=category, y=log(price), fill= category)) + 
+  geom_boxplot()
+```
+We can see that made a minor difference in things like amakeup and haircare, (which essentially it should do)
+
+Finally, let's make a new csv just like that. I am removing the z-scores and keeping the log prices.
+
+# Making a New CSV
+
+```{r}
+sephora <- sephora_z[, 1:45]
+write.csv(sephora, "sephora_clean_v2.csv", row.names=FALSE)
+```
+
+
+
